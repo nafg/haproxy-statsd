@@ -43,6 +43,23 @@ def get_haproxy_report(url, user=None, password=None):
     return csv.DictReader(data.splitlines())
 
 
+def is_number(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        pass
+
+    try:
+        import unicodedata
+        unicodedata.numeric(s)
+        return True
+    except (TypeError, ValueError):
+        pass
+
+    return False
+
+
 def report_to_statsd(stat_rows,
                      host=os.getenv('STATSD_HOST', '127.0.0.1'),
                      port=os.getenv('STATSD_PORT', 8125),
@@ -55,10 +72,25 @@ def report_to_statsd(stat_rows,
         path = '.'.join([namespace, row['pxname'], row['svname']])
 
         # Report each stat that we want in each row
-        for stat in ['scur', 'smax', 'ereq', 'econ', 'rate', 'bin', 'bout', 'hrsp_1xx', 'hrsp_2xx', 'hrsp_3xx', 'hrsp_4xx', 'hrsp_5xx', 'qtime', 'ctime', 'rtime', 'ttime']:
-            val = row.get(stat) or 0
+        for stat in row:
+            val = row.get(stat)
+
+            # We skip unwanted metrics
+            # (used in the path, meanignless, non numeric, or no value)
+            if (stat in ['pxname', 'svname', 'status', 'check_status',
+                'check_code', 'last_chk', 'last_agt', 'pid', 'iid',
+                'sid', 'tracked', 'type']) or (not is_number(val)) or (not val):
+                continue
+
+            # By default we report a gauge.
+            metric_type = 'g'
+
+            # We report timing metrics with the proper type
+            if (stat in ['check_duration', 'qtime', 'ctime', 'rtime', 'ttime']):
+                metric_type = 'ms'
+
             udp_sock.sendto(
-                '%s.%s:%s|g' % (path, stat, val), (host, port))
+                '%s.%s:%s|%s' % (path, stat, val, metric_type), (host, port))
             stat_count += 1
     return stat_count
 
