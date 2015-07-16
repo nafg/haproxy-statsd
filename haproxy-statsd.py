@@ -29,8 +29,51 @@ import argparse
 import ConfigParser
 import os
 
-import requests
-from requests.auth import HTTPBasicAuth
+DEFAULT_SOCKET = '/var/lib/haproxy/stats'
+RECV_SIZE = 1024
+
+
+class HAProxySocket(object):
+  def __init__(self, socket_file=DEFAULT_SOCKET):
+    self.socket_file = socket_file
+
+  def connect(self):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(self.socket_file)
+    return s
+
+  def communicate(self, command):
+    ''' Send a single command to the socket and return a single response (raw string) '''
+    s = self.connect()
+    if not command.endswith('\n'): command += '\n'
+    s.send(command)
+    result = ''
+    buf = ''
+    buf = s.recv(RECV_SIZE)
+    while buf:
+      result += buf
+      buf = s.recv(RECV_SIZE)
+    s.close()
+    return result
+
+  def get_server_info_and_stats(self):
+
+    output = self.communicate('show stat')
+    #sanitize and make a list of lines
+    output = output.lstrip('# ').strip()
+    output = [ l.strip(',') for l in output.splitlines() ]
+    csvreader = csv.DictReader(output)
+    result = [ d.copy() for d in csvreader ]
+
+    output = self.communicate('show info')
+    for line in output.splitlines():
+      try:
+        key,val = line.split(':')
+      except ValueError, e:
+        continue
+      result.append({ key.strip(): val.strip() })
+
+    return result
 
 
 def get_haproxy_report(url, user=None, password=None):
@@ -47,7 +90,7 @@ def is_number(s):
     try:
         float(s)
         return True
-    except ValueError:
+    except (ValueError, TypeError):
         pass
 
     try:
@@ -69,7 +112,10 @@ def report_to_statsd(stat_rows,
 
     # Report for each row
     for row in stat_rows:
-        path = '.'.join([namespace, row['pxname'], row['svname']])
+        if (('pxname' in row) and ('svname' in row)):
+            path = '.'.join([namespace, row['pxname'], row['svname']])
+        else:
+            path = '.'.join([namespace, 'general_process_info'])
 
         # Report each stat that we want in each row
         for stat in row:
@@ -77,9 +123,10 @@ def report_to_statsd(stat_rows,
 
             # We skip unwanted metrics
             # (used in the path, meanignless, non numeric, or no value)
-            if (stat in ['pxname', 'svname', 'status', 'check_status',
+            if ((stat in ['pxname', 'svname', 'status', 'check_status',
                 'check_code', 'last_chk', 'last_agt', 'pid', 'iid',
-                'sid', 'tracked', 'type']) or (not is_number(val)) or (not val):
+                'sid', 'tracked', 'type', 'Pid'])
+                or (not is_number(val)) or (not val)):
                 continue
 
             # By default we report a gauge.
@@ -88,6 +135,8 @@ def report_to_statsd(stat_rows,
             # We report timing metrics with the proper type
             if (stat in ['check_duration', 'qtime', 'ctime', 'rtime', 'ttime']):
                 metric_type = 'ms'
+
+            stat = stat.replace('-', '_')
 
             udp_sock.sendto(
                 '%s.%s:%s|%s' % (path, stat, val, metric_type), (host, port))
@@ -109,6 +158,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     config = ConfigParser.ConfigParser({
         'haproxy_url': os.getenv('HAPROXY_HOST', 'http://127.0.0.1:1936/;csv'),
+        'haproxy_socket': '',
         'haproxy_user': os.getenv('HAPROXY_USER',''),
         'haproxy_password': os.getenv('HAPROXY_PASS',''),
         'statsd_namespace': os.getenv('STATSD_NAMESPACE', 'haproxy.(HOSTNAME)'),
@@ -122,16 +172,27 @@ if __name__ == '__main__':
     # Generate statsd namespace
     namespace = config.get('haproxy-statsd', 'statsd_namespace')
     if '(HOSTNAME)' in namespace:
-        namespace = namespace.replace('(HOSTNAME)', socket.gethostname())
+        namespace = namespace.replace('(HOSTNAME)', socket.gethostname().replace('.', '_'))
 
     interval = config.getfloat('haproxy-statsd', 'interval')
 
     try:
+        haproxy_socket = None
+        socket_file = config.get('haproxy-statsd', 'haproxy_socket')
+        if socket_file:
+            haproxy_socket = HAProxySocket(socket_file)
+        else:
+            import requests
+            from requests.auth import HTTPBasicAuth
+
         while True:
-            report_data = get_haproxy_report(
-                config.get('haproxy-statsd', 'haproxy_url'),
-                user=config.get('haproxy-statsd', 'haproxy_user'),
-                password=config.get('haproxy-statsd', 'haproxy_password'))
+            if haproxy_socket:
+                report_data = haproxy_socket.get_server_info_and_stats()
+            else:
+                report_data = get_haproxy_report(
+                    config.get('haproxy-statsd', 'haproxy_url'),
+                    user=config.get('haproxy-statsd', 'haproxy_user'),
+                    password=config.get('haproxy-statsd', 'haproxy_password'))
 
             report_num = report_to_statsd(
                 report_data,
