@@ -158,7 +158,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     config = ConfigParser.ConfigParser({
         'haproxy_url': os.getenv('HAPROXY_HOST', 'http://127.0.0.1:1936/;csv'),
-        'haproxy_socket': '',
+        'haproxy_socket': os.getenv('HAPROXY_SOCKET', ''),
         'haproxy_user': os.getenv('HAPROXY_USER',''),
         'haproxy_password': os.getenv('HAPROXY_PASS',''),
         'statsd_namespace': os.getenv('STATSD_NAMESPACE', 'haproxy.(HOSTNAME)'),
