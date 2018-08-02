@@ -164,7 +164,7 @@ if __name__ == '__main__':
         'statsd_namespace': os.getenv('STATSD_NAMESPACE', 'haproxy.(HOSTNAME)'),
         'statsd_host': os.getenv('STATSD_HOST', '127.0.0.1'),
         'statsd_port': os.getenv('STATSD_PORT', 8125),
-        'interval': '5',
+        'interval': os.getenv('HAPROXYSTATSD_INTERVAL', '5'),
     })
     config.add_section('haproxy-statsd')
     config.read(args.config)
